@@ -30,8 +30,14 @@ export type MessageEntryLike = {
   parts?: Array<{ type?: string }>
 }
 
+export type ModelLimit = {
+  context?: number
+  input?: number
+  output?: number
+}
+
 export type ModelLike = {
-  limit?: { context?: number }
+  limit?: ModelLimit
 }
 
 export type ProviderLike = {
@@ -42,6 +48,8 @@ export type ProviderLike = {
 export type ContextSnapshot = {
   tokens: number
   limit?: number
+  inputLimit?: number
+  outputLimit?: number
   remaining?: number
   percent?: number
   updatedAt?: number
@@ -54,7 +62,7 @@ export type ContextSnapshot = {
 const count = (value: unknown) =>
   typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0
 
-const formatTokens = (value: number) =>
+export const formatTokens = (value: number) =>
   value < 1_000 ? String(value) : `${Math.floor(value / 1_000)}k`
 
 const formatTimestamp = (value: number) => {
@@ -107,16 +115,22 @@ export function findLastUser(entries: readonly MessageEntryLike[]): MessageInfoL
   return index >= 0 ? entries[index].info : undefined
 }
 
+export function findModelLimit(
+  providers: readonly ProviderLike[],
+  providerID: string | undefined,
+  modelID: string | undefined,
+): ModelLimit | undefined {
+  if (!providerID || !modelID) return undefined
+  const provider = providers.find((item) => item.id === providerID)
+  return provider?.models?.[modelID]?.limit
+}
+
 export function findContextLimit(
   providers: readonly ProviderLike[],
   providerID: string | undefined,
   modelID: string | undefined,
 ): number | undefined {
-  if (!providerID || !modelID) return undefined
-  const provider = providers.find((item) => item.id === providerID)
-  const model = provider?.models?.[modelID]
-  if (!model?.limit?.context) return undefined
-  return model.limit.context
+  return findModelLimit(providers, providerID, modelID)?.context
 }
 
 export function snapshotFromMessages(
@@ -128,7 +142,8 @@ export function snapshotFromMessages(
   if (!entry) return undefined
 
   const tokens = usageTotal(entry.info.tokens)
-  const limit = findContextLimit(providers, entry.info.providerID, entry.info.modelID)
+  const limits = findModelLimit(providers, entry.info.providerID, entry.info.modelID)
+  const limit = limits?.context
   const percent = limit ? Math.round((tokens / limit) * 100) : undefined
   const remaining = limit ? Math.max(0, limit - tokens) : undefined
   const completed = entry.info.time?.completed
@@ -144,6 +159,8 @@ export function snapshotFromMessages(
   return {
     tokens,
     limit,
+    inputLimit: limits?.input,
+    outputLimit: limits?.output,
     remaining,
     percent,
     updatedAt,
@@ -181,7 +198,108 @@ export function nextAutomaticThreshold(
   return nextThresholdAfter(notified)
 }
 
-export function formatSnapshot(snapshot: ContextSnapshot, nextNotice?: Threshold): string {
+export const OUTPUT_TOKEN_MAX = 32_000
+export const DEFAULT_COMPACTION_RESERVED = 20_000
+
+export type CompactionSettings = {
+  auto?: boolean
+  reserved?: number
+}
+
+export type CompactionPlan = {
+  enabled: boolean
+  due: boolean
+  triggerTokens: number
+  triggerRemaining: number
+  triggerPercent: number
+}
+
+export type DeliberateCompactionConfig = {
+  percent?: number
+  remainingTokens?: number
+}
+
+export function maxOutputTokens(outputLimit: number | undefined): number {
+  const value = typeof outputLimit === "number" && outputLimit > 0 ? outputLimit : OUTPUT_TOKEN_MAX
+  return Math.min(value, OUTPUT_TOKEN_MAX) || OUTPUT_TOKEN_MAX
+}
+
+export function usableTokens(
+  snapshot: Pick<ContextSnapshot, "limit" | "inputLimit" | "outputLimit">,
+  settings: CompactionSettings,
+): number | undefined {
+  if (!snapshot.limit) return undefined
+  const output = maxOutputTokens(snapshot.outputLimit)
+  const reserved = settings.reserved ?? Math.min(DEFAULT_COMPACTION_RESERVED, output)
+  if (snapshot.inputLimit) return Math.max(0, snapshot.inputLimit - reserved)
+  return Math.max(0, snapshot.limit - output)
+}
+
+export function compactionPlan(
+  snapshot: ContextSnapshot,
+  settings: CompactionSettings,
+): CompactionPlan | undefined {
+  if (settings.auto === false) {
+    return { enabled: false, due: false, triggerTokens: 0, triggerRemaining: 0, triggerPercent: 0 }
+  }
+  const usable = usableTokens(snapshot, settings)
+  if (usable === undefined || !snapshot.limit) return undefined
+  return {
+    enabled: true,
+    due: snapshot.tokens >= usable,
+    triggerTokens: usable,
+    triggerRemaining: Math.max(0, snapshot.limit - usable),
+    triggerPercent: Math.min(100, Math.max(0, Math.round((usable / snapshot.limit) * 100))),
+  }
+}
+
+export function formatCompactionPolicy(plan: CompactionPlan | undefined): string {
+  if (!plan) return "Automatic compaction (built-in): status unavailable (context limit unknown)."
+  if (!plan.enabled) return "Automatic compaction (built-in): disabled."
+  if (plan.due) {
+    return `Automatic compaction (built-in): due now (below the ~${formatTokens(plan.triggerRemaining)} tokens remaining trigger); it runs when the current step finishes.`
+  }
+  return `Automatic compaction (built-in): at ~${formatTokens(plan.triggerRemaining)} tokens remaining (~${plan.triggerPercent}% used).`
+}
+
+export function deliberateCompactionAvailable(
+  snapshot: ContextSnapshot,
+  config: DeliberateCompactionConfig,
+): boolean {
+  const percentHit =
+    config.percent !== undefined && snapshot.percent !== undefined && snapshot.percent >= config.percent
+  const tokensHit =
+    config.remainingTokens !== undefined &&
+    snapshot.remaining !== undefined &&
+    snapshot.remaining <= config.remainingTokens
+  return percentHit || tokensHit
+}
+
+export function describeDeliberateThreshold(config: DeliberateCompactionConfig): string {
+  if (config.percent !== undefined && config.remainingTokens !== undefined) {
+    return `${config.percent}% used or ${formatTokens(config.remainingTokens)} tokens remaining`
+  }
+  if (config.percent !== undefined) return `${config.percent}% used`
+  if (config.remainingTokens !== undefined) return `${formatTokens(config.remainingTokens)} tokens remaining`
+  return "50% used"
+}
+
+export function formatDeliberateCompaction(
+  snapshot: ContextSnapshot,
+  config: DeliberateCompactionConfig | undefined,
+): string {
+  if (!config) return "Deliberate compaction: disabled."
+  if (deliberateCompactionAvailable(snapshot, config)) {
+    return "Deliberate compaction: available now (optional). At a natural stopping point, save important state to files or todos, then call compact_session. Do not interrupt current work just to compact."
+  }
+  return `Deliberate compaction: available from ${describeDeliberateThreshold(config)}.`
+}
+
+export function formatSnapshot(
+  snapshot: ContextSnapshot,
+  nextNotice?: Threshold,
+  extraLines: string[] = [],
+): string {
   const lines = [
     "Context (matches the UI sidebar)",
     `Used: ${formatTokens(snapshot.tokens)}${
@@ -194,10 +312,13 @@ export function formatSnapshot(snapshot: ContextSnapshot, nextNotice?: Threshold
   }
 
   lines.push(
-    nextNotice
-      ? `Next automatic notification: when context reaches ${nextNotice}%.`
-      : "Next automatic notification: none (the final threshold has already been reached).",
+    nextNotice === undefined
+      ? "Next automatic notification: none (the final threshold has already been reached)."
+      : snapshot.percent !== undefined && nextNotice <= snapshot.percent
+        ? `Next automatic notification: on the next model request (the ${nextNotice}% threshold is already crossed).`
+        : `Next automatic notification: when context reaches ${nextNotice}%.`,
   )
+  lines.push(...extraLines)
   lines.push(`Updated: ${snapshot.updatedDescription}.`)
   lines.push(`Model: ${snapshot.providerID}/${snapshot.modelID}`)
   lines.push("Source: latest provider-reported token usage, not a tokenizer estimate.")
@@ -205,7 +326,11 @@ export function formatSnapshot(snapshot: ContextSnapshot, nextNotice?: Threshold
   return lines.join("\n")
 }
 
-export function formatThresholdNotice(snapshot: ContextSnapshot, threshold: Threshold): string {
+export function formatThresholdNotice(
+  snapshot: ContextSnapshot,
+  threshold: Threshold,
+  extraLines: string[] = [],
+): string {
   const next = nextThreshold(threshold)
   const nextText = next
     ? `You will be notified again when the context reaches ${next}%.`
@@ -218,6 +343,7 @@ export function formatThresholdNotice(snapshot: ContextSnapshot, threshold: Thre
       ? [`Remaining: ${formatTokens(snapshot.remaining)} tokens`]
       : []),
     `Based on the latest provider-reported usage. ${nextText}`,
+    ...extraLines,
     "Use the context_remaining tool at any time to check the current value and when it was last updated.",
   ].join("\n")
 }

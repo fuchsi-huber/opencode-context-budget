@@ -1,6 +1,6 @@
 {
   "name": "opencode-context-budget",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "OpenCode plugin that reports remaining context-window budget to agents through a context_remaining tool and automatic threshold notices.",
   "type": "module",
   "license": "MIT",

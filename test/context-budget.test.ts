@@ -2,6 +2,11 @@ import test from "node:test"
 import assert from "node:assert/strict"
 
 import {
+  compactionPlan,
+  deliberateCompactionAvailable,
+  describeDeliberateThreshold,
+  formatCompactionPolicy,
+  formatDeliberateCompaction,
   formatSnapshot,
   formatThresholdNotice,
   nextAutomaticThreshold,
@@ -15,17 +20,23 @@ const providers = [
     id: "openrouter",
     models: {
       "test-model": { limit: { context: 100_000 } },
+      "compaction-model": { limit: { context: 1_000_000, input: 1_000_000, output: 32_000 } },
     },
   },
 ]
 
-function assistant(id: string, tokens: object, completed = 1_700_000_000_000) {
+function assistant(
+  id: string,
+  tokens: object,
+  completed = 1_700_000_000_000,
+  modelID = "test-model",
+) {
   return {
     info: {
       id,
       role: "assistant" as const,
       providerID: "openrouter",
-      modelID: "test-model",
+      modelID,
       time: { created: completed - 1_000, completed },
       tokens,
     },
@@ -88,7 +99,13 @@ test("formatted output includes usage, remaining budget, and the next warning", 
   const text = formatSnapshot(snapshot!, nextAutomaticThreshold(snapshot!.percent, 0))
   assert.match(text, /Used: 90k \/ 100k tokens \(90% used\)/)
   assert.match(text, /Remaining: 10k tokens/)
-  assert.match(text, /Next automatic notification: when context reaches 90%/)
+  assert.match(text, /Next automatic notification: on the next model request \(the 90% threshold is already crossed\)/)
+
+  const upcoming = formatSnapshot(snapshot!, nextAutomaticThreshold(snapshot!.percent, 90))
+  assert.match(upcoming, /Next automatic notification: none/)
+
+  const pending = formatSnapshot(snapshot!, 90)
+  assert.match(pending, /Next automatic notification: on the next model request/)
 
   const finalText = formatSnapshot(snapshot!, undefined)
   assert.match(finalText, /Next automatic notification: none/)
@@ -97,3 +114,67 @@ test("formatted output includes usage, remaining budget, and the next warning", 
   assert.match(notice, /context indicator is at 90%/)
   assert.match(notice, /final configured threshold/)
 })
+
+function compactionSnapshot(tokens: number) {
+  const snapshot = snapshotFromMessages(
+    [assistant("latest", { input: tokens, output: 1_000 }, undefined, "compaction-model")],
+    providers,
+  )
+  assert.ok(snapshot)
+  return snapshot!
+}
+
+test("compactionPlan mirrors the built-in reserved buffer", () => {
+  const snapshot = compactionSnapshot(500_000)
+  const plan = compactionPlan(snapshot, {})
+  assert.ok(plan)
+  assert.equal(plan?.enabled, true)
+  assert.equal(plan?.due, false)
+  assert.equal(plan?.triggerRemaining, 20_000)
+  assert.equal(plan?.triggerPercent, 98)
+})
+
+test("compactionPlan honors a custom reserved buffer", () => {
+  const plan = compactionPlan(compactionSnapshot(500_000), { reserved: 50_000 })
+  assert.ok(plan)
+  assert.equal(plan?.triggerRemaining, 50_000)
+  assert.equal(plan?.triggerPercent, 95)
+})
+
+test("compactionPlan reports disabled and due states", () => {
+  const snapshot = compactionSnapshot(500_000)
+  assert.equal(compactionPlan(snapshot, { auto: false })?.enabled, false)
+  assert.equal(compactionPlan(compactionSnapshot(990_000), {})?.due, true)
+})
+
+test("deliberate compaction is gated by percent or remaining tokens", () => {
+  const snapshot = compactionSnapshot(700_000)
+  assert.equal(snapshot.percent, 70)
+  assert.equal(snapshot.remaining, 299_000)
+
+  assert.equal(deliberateCompactionAvailable(snapshot, { percent: 50 }), true)
+  assert.equal(deliberateCompactionAvailable(snapshot, { percent: 75 }), false)
+  assert.equal(deliberateCompactionAvailable(snapshot, { remainingTokens: 400_000 }), true)
+  assert.equal(deliberateCompactionAvailable(snapshot, { remainingTokens: 200_000 }), false)
+  assert.equal(deliberateCompactionAvailable(snapshot, { percent: 75, remainingTokens: 400_000 }), true)
+  assert.equal(describeDeliberateThreshold({ percent: 50 }), "50% used")
+  assert.equal(describeDeliberateThreshold({ remainingTokens: 200_000 }), "200k tokens remaining")
+})
+
+test("compaction lines describe built-in and deliberate compaction", () => {
+  const snapshot = compactionSnapshot(700_000)
+  const policy = formatCompactionPolicy(compactionPlan(snapshot, {}))
+  assert.match(policy, /at ~20k tokens remaining \(~98% used\)/)
+
+  const due = formatCompactionPolicy(compactionPlan(compactionSnapshot(990_000), {}))
+  assert.match(due, /due now/)
+
+  const available = formatDeliberateCompaction(snapshot, { percent: 50 })
+  assert.match(available, /available now \(optional\)/)
+  assert.match(available, /save important state to files or todos/)
+  assert.match(available, /Do not interrupt current work just to compact/)
+
+  const later = formatDeliberateCompaction(snapshot, { percent: 80 })
+  assert.match(later, /available from 80% used/)
+})
+
