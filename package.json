@@ -1,0 +1,38 @@
+{
+  "name": "opencode-context-budget",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that reports remaining context-window budget to agents through a context_remaining tool and automatic threshold notices.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "context-window",
+    "context-budget",
+    "tokens",
+    "llm"
+  ],
+  "main": "./src/server.ts",
+  "exports": {
+    ".": "./src/server.ts",
+    "./server": "./src/server.ts",
+    "./lib": "./src/lib/context-budget.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "opencode": ">=1.18.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.31",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}
