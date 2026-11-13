@@ -3,123 +3,193 @@ import assert from "node:assert/strict"
 
 import plugin from "../src/server.ts"
 
-const providers = [
-  {
-    id: "openrouter",
-    models: {
-      m: { limit: { context: 1_000_000, input: 1_000_000, output: 32_000 } },
-    },
-  },
-]
-
-function entriesWith(input: number) {
-  return [
-    {
-      info: {
-        id: "msg",
-        role: "assistant" as const,
-        providerID: "openrouter",
-        modelID: "m",
-        time: { created: 1_699_999_999_000, completed: 1_700_000_000_000 },
-        tokens: { input, output: 1_000 },
-      },
-      parts: [{ type: "text" }],
-    },
-  ]
+const model = {
+  id: "m",
+  modelID: "m",
+  providerID: "p",
+  limit: { context: 1_000_000, output: 32_000 },
 }
 
-type SummarizeInput = { path: { id: string }; body: { providerID: string; modelID: string } }
+type SessionInfo = {
+  tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+  model: { providerID: string; id: string }
+  time: { updated: number; idle?: number }
+}
 
-function fakeClient(
-  entries: ReturnType<typeof entriesWith>,
-  summarize: (input: SummarizeInput) => Promise<{ data: boolean }> = async () => ({ data: true }),
-) {
+function session(input = 700_000): SessionInfo {
   return {
+    tokens: { input, output: 1_000, reasoning: 0, cache: { read: 0, write: 0 } },
+    model: { providerID: "p", id: "m" },
+    time: { updated: 1_700_000_000_000, idle: 1_700_000_000_000 },
+  }
+}
+
+function emptySession(): SessionInfo {
+  return {
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    model: { providerID: "p", id: "m" },
+    time: { updated: 1_700_000_000_000 },
+  }
+}
+
+function makeContext(options: Record<string, unknown> = {}, info: SessionInfo = session()) {
+  const tools = new Map<string, any>()
+  const compactions: any[] = []
+  const queue: any[] = []
+  let contextHook: ((event: any) => Promise<void> | void) | undefined
+  let closed = false
+
+  const ctx = {
+    options,
     session: {
-      messages: async () => ({ data: entries }),
-      summarize,
+      get: async () => info,
+      hook: async (name: string, callback: any) => {
+        if (name === "context") contextHook = callback
+        return { dispose: async () => {} }
+      },
+      compact: async (input: any) => {
+        compactions.push(input)
+        return { id: "compact" }
+      },
     },
-    config: {
-      providers: async () => ({ data: { providers } }),
+    model: {
+      list: async () => ({ location: {}, data: [model] }),
+      default: async () => ({ location: {}, data: model }),
+    },
+    tool: {
+      transform: async (callback: any) => {
+        callback({
+          add: (tool: any) => tools.set(tool.name, tool),
+          get: () => undefined,
+          list: () => [],
+          update: () => {},
+          remove: () => {},
+          namespace: () => {},
+        })
+        return { dispose: async () => {} }
+      },
+    },
+    event: {
+      subscribe: (input?: { signal?: AbortSignal }) => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: async () => {
+              while (!closed && !input?.signal?.aborted) {
+                if (queue.length) return { done: false, value: queue.shift() }
+                await new Promise((resolve) => setTimeout(resolve, 1))
+              }
+              return { done: true, value: undefined }
+            },
+          }
+        },
+      }),
+    },
+  }
+
+  return {
+    ctx,
+    tools,
+    compactions,
+    getContextHook: () => contextHook,
+    pushEvent: (event: any) => queue.push(event),
+    close: () => {
+      closed = true
     },
   }
 }
 
-const context = { sessionID: "s1", directory: "/tmp" } as never
+type Fake = ReturnType<typeof makeContext>
 
-test("config hook reads native compaction settings without changing them", async () => {
-  const hooks = await plugin({ client: fakeClient(entriesWith(500_000)) } as never, {})
-  const config: { compaction?: { auto?: boolean; reserved?: number } } = {
-    compaction: { auto: true, reserved: 50_000 },
+async function withPlugin(
+  input: { options?: Record<string, unknown>; session?: SessionInfo },
+  run: (fake: Fake) => Promise<void>,
+) {
+  const fake = makeContext(input.options, input.session)
+  const cleanup = await plugin.setup(fake.ctx as never)
+  try {
+    await run(fake)
+  } finally {
+    fake.close()
+    await cleanup?.()
   }
-  await hooks.config?.(config as never)
-  assert.deepEqual(config.compaction, { auto: true, reserved: 50_000 })
+}
 
-  const tool = hooks.tool?.context_remaining
-  assert.ok(tool)
-  const result = String(await tool.execute({}, context))
-  assert.match(result, /Automatic compaction \(built-in\): at ~50k tokens remaining/)
+const toolContext = { sessionID: "s1" } as never
+
+test("registers context_remaining and leaves compact_session disabled by default", async () => {
+  await withPlugin({}, async (fake) => {
+    assert.equal(fake.tools.has("context_remaining"), true)
+    assert.equal(fake.tools.has("compact_session"), false)
+  })
 })
 
-test("config hook respects native auto compaction being disabled", async () => {
-  const hooks = await plugin({ client: fakeClient(entriesWith(500_000)) } as never, {})
-  const config: { compaction?: { auto?: boolean; reserved?: number } } = { compaction: { auto: false } }
-  await hooks.config?.(config as never)
-  assert.deepEqual(config.compaction, { auto: false })
-
-  const tool = hooks.tool?.context_remaining
-  assert.ok(tool)
-  const result = String(await tool.execute({}, context))
-  assert.match(result, /Automatic compaction \(built-in\): disabled/)
+test("context_remaining reports usage and deliberate compaction availability", async () => {
+  await withPlugin({ options: { agentCompact: { percent: 50 } } }, async (fake) => {
+    const result = await fake.tools.get("context_remaining").execute({}, toolContext)
+    assert.match(result.content, /Used: 701k \/ 1000k tokens \(70% used\)/)
+    assert.match(result.content, /Remaining: 299k tokens/)
+    assert.match(result.content, /Deliberate compaction: available now \(optional\)/)
+  })
 })
 
-test("compact_session is only registered when deliberate compaction is enabled", async () => {
-  const off = await plugin({ client: fakeClient(entriesWith(0)) } as never, {})
-  assert.equal("compact_session" in (off.tool ?? {}), false)
+test("context_remaining explains when no usage exists", async () => {
+  await withPlugin({ session: emptySession() }, async (fake) => {
+    const result = await fake.tools.get("context_remaining").execute({}, toolContext)
+    assert.match(result.content, /No context usage has been reported/)
+  })
+})
 
-  const on = await plugin({ client: fakeClient(entriesWith(0)) } as never, { agentCompact: true })
-  assert.equal("compact_session" in (on.tool ?? {}), true)
+test("context hook injects each threshold notice once per session", async () => {
+  await withPlugin({ options: { agentCompact: { percent: 50 } } }, async (fake) => {
+    const hook = fake.getContextHook()
+    assert.ok(hook)
+
+    const first: any[] = []
+    await hook!({ sessionID: "s1", system: first })
+    assert.equal(first.length, 1)
+    assert.match(first[0].text, /context indicator is at 70%/)
+    assert.match(first[0].text, /Deliberate compaction: available now/)
+
+    const second: any[] = []
+    await hook!({ sessionID: "s1", system: second })
+    assert.equal(second.length, 0)
+  })
+})
+
+test("compaction events reset threshold state", async () => {
+  await withPlugin({}, async (fake) => {
+    const hook = fake.getContextHook()
+    assert.ok(hook)
+
+    const first: any[] = []
+    await hook!({ sessionID: "s1", system: first })
+    assert.equal(first.length, 1)
+
+    const second: any[] = []
+    await hook!({ sessionID: "s1", system: second })
+    assert.equal(second.length, 0)
+
+    fake.pushEvent({ type: "session.compaction.ended", data: { sessionID: "s1" } })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+
+    const third: any[] = []
+    await hook!({ sessionID: "s1", system: third })
+    assert.equal(third.length, 1)
+  })
+})
+
+test("compact_session calls session.compact when available", async () => {
+  await withPlugin({ options: { agentCompact: { percent: 50 } } }, async (fake) => {
+    const result = await fake.tools.get("compact_session").execute({}, toolContext)
+    assert.match(result.content, /Compaction requested/)
+    assert.deepEqual(fake.compactions, [{ sessionID: "s1" }])
+  })
 })
 
 test("compact_session refuses before the threshold", async () => {
-  const hooks = await plugin({ client: fakeClient(entriesWith(100_000)) } as never, { agentCompact: { percent: 50 } })
-  const tool = hooks.tool?.compact_session
-  assert.ok(tool)
-  const result = await tool.execute({}, context)
-  assert.match(String(result), /not available yet/)
-  assert.match(String(result), /50% used/)
-})
-
-test("compact_session schedules and runs compaction on the next idle event", async () => {
-  const calls: SummarizeInput[] = []
-  const client = fakeClient(entriesWith(700_000), async (input) => {
-    calls.push(input)
-    return { data: true }
+  await withPlugin({ options: { agentCompact: { percent: 90 } }, session: session(100_000) }, async (fake) => {
+    const result = await fake.tools.get("compact_session").execute({}, toolContext)
+    assert.match(result.content, /not available yet/)
+    assert.equal(fake.compactions.length, 0)
   })
-  const hooks = await plugin({ client } as never, { agentCompact: { percent: 50 } })
-  await hooks.config?.({} as never)
-
-  const tool = hooks.tool?.compact_session
-  assert.ok(tool)
-  const result = await tool.execute({}, context)
-  assert.match(String(result), /Compaction scheduled/)
-  assert.equal(calls.length, 0)
-
-  const system = { system: [] as string[] }
-  await hooks["experimental.chat.system.transform"]?.({ sessionID: "s1" } as never, system)
-  assert.equal(system.system.length, 1)
-
-  await hooks.event?.({ event: { type: "session.idle", properties: { sessionID: "s1" } } } as never)
-  assert.deepEqual(calls, [{ path: { id: "s1" }, body: { providerID: "openrouter", modelID: "m" } }])
-})
-
-test("context_remaining includes built-in and deliberate compaction status", async () => {
-  const hooks = await plugin({ client: fakeClient(entriesWith(700_000)) } as never, { agentCompact: { percent: 50 } })
-  await hooks.config?.({} as never)
-
-  const tool = hooks.tool?.context_remaining
-  assert.ok(tool)
-  const result = String(await tool.execute({}, context))
-  assert.match(result, /Automatic compaction \(built-in\): at ~20k tokens remaining \(~98% used\)/)
-  assert.match(result, /Deliberate compaction: available now \(optional\)/)
 })

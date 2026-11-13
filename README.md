@@ -1,176 +1,166 @@
 # opencode-context-budget
 
-An [OpenCode](https://opencode.ai) plugin that tells agents how much of the
+An [OpenCode](https://opencode.ai) 2.x plugin that tells agents how much of the
 model's context window is left.
 
-It adds:
+## What it does
 
-- **`context_remaining` tool** – returns used tokens, context limit, remaining
-  tokens, percentage, the next automatic warning threshold, automatic
-  compaction status, and when the value was last updated.
-- **Automatic threshold notices** – injects a short system message when the
-  context indicator reaches 50%, 75%, and 90%.
-- **Optional deliberate compaction** – a `compact_session` tool agents can call
-  at a safe stopping point. Compaction is scheduled and runs after the turn.
-- **Built-in compaction reporting** – reports when OpenCode's own automatic
-  compaction will run. The plugin reads OpenCode's `compaction` config and does
-  not modify it.
+- **`context_remaining` tool** — returns used tokens, context limit, remaining
+  tokens, percentage used, the next automatic warning threshold, deliberate
+  compaction availability, and when the value was last updated.
+- **Automatic threshold notices** — adds a short system message when context
+  usage reaches 50%, 75%, or 90%.
+- **Optional `compact_session` tool** — lets an agent request a deliberate
+  compaction at a safe stopping point.
 
 The numbers come from the latest provider-reported token usage, so they match
 the context indicator in the OpenCode UI sidebar (they are not a tokenizer
 estimate).
 
-## Automatic compaction
+## Compatibility
 
-OpenCode already has automatic compaction. This plugin does **not** run a second
-compaction system; it reports the built-in one and leaves the settings alone.
-Configure it in `opencode.json(c)`:
+This package targets OpenCode 2.x: the `plugins` config key and the
+`@opencode/plugin` API. The package declares `opencode >=2.0.0`.
+
+The earlier OpenCode 1.x implementation remains in this repository's history,
+but it is not compatible with 2.x and is not installed by the current package.
+
+## Installation
+
+This plugin is distributed from GitHub; it is not published on npm.
+
+### Install with the OpenCode CLI (recommended)
+
+```sh
+opencode plugin add github:fuchsi-huber/opencode-context-budget --global
+```
+
+The CLI installs the package and adds it to your global config. It writes the
+plain-string form of the plugin entry. To pass options, edit the config and use
+the object form shown under [Configuration](#configuration).
+
+### Clone and reference the directory (fallback)
+
+```sh
+git clone https://github.com/fuchsi-huber/opencode-context-budget.git ~/code/opencode-context-budget
+```
+
+Add the absolute path to `~/.config/opencode/opencode.jsonc`:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["/home/you/code/opencode-context-budget"]
+}
+```
+
+Configured local plugin paths must be directories. The package entry is
+`src/server.ts`.
+
+Restart OpenCode after changing the config; plugins are loaded at startup.
+
+## Configuration
+
+### Plugin options
+
+Options use the object form of the `plugins` entry:
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    {
+      "package": "github:fuchsi-huber/opencode-context-budget",
+      "options": {
+        "agentCompact": { "percent": 50 }
+      }
+    }
+  ]
+}
+```
+
+For a local clone, use the absolute directory as `package`.
+
+#### `agentCompact`
+
+Controls registration and gating of the `compact_session` tool. It is disabled
+by default.
+
+```jsonc
+"agentCompact": { "percent": 50 }             // available from 50% used (default gate for `true`)
+"agentCompact": { "remainingTokens": 200000 } // available when 200k or fewer tokens remain
+"agentCompact": true                          // same as { "percent": 50 }
+"agentCompact": false                         // disabled (default)
+```
+
+If both `percent` and `remainingTokens` are set, the tool becomes available when
+either condition is met. An object with neither a valid `percent` nor a valid
+`remainingTokens` behaves like `true`. `percent` must be greater than 0 and at
+most 100; `remainingTokens` must be a positive number.
+
+`agentCompact` does not create a separate notification milestone. The normal
+50/75/90 notices mention deliberate compaction only when it is currently
+available.
+
+### Automatic compaction
+
+OpenCode has built-in automatic compaction. Configure it in `opencode.json(c)`:
 
 ```jsonc
 {
   "compaction": {
     "auto": true,
-    "reserved": 50000
+    "buffer": "20%",
+    "keep": { "tokens": 15000 }
   }
 }
 ```
 
-`compaction.reserved` is the token buffer OpenCode leaves before triggering
-compaction (default: `min(20000, maxOutputTokens)`), so `50000` means "compact
-when about 50k tokens remain". It is a token buffer, not a percentage, because
-the buffer is global while context limits vary per model. If `compaction.auto`
-is `false`, the plugin reports `Automatic compaction (built-in): disabled.`
+- `auto` (default `true`) compacts automatically near the context limit.
+- `buffer` is the room kept free below the model's window. It accepts a share
+  such as `"20%"` or a token count; the default is `"15%"`, at least 16k.
+- `keep.tokens` is the approximate recent conversation kept beside the summary;
+  the default is 15000.
 
-There is currently no dedicated CLI command for these settings; edit the config
-file (see below). Verify the resolved values with:
+This plugin neither reads nor changes these settings. OpenCode 2.x does not
+expose the effective compaction configuration to plugins, so the plugin cannot
+report the exact automatic compaction trigger. Configure and verify it with
+`opencode debug config`.
 
-```sh
-opencode debug config
-```
+## Agent-facing output
 
-## Options
-
-Options are passed with the tuple form of the `plugin` config entry:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    [
-      "/home/you/code/opencode-context-budget",
-      {
-        "agentCompact": { "percent": 50 }
-      }
-    ]
-  ]
-}
-```
-
-### `agentCompact`
-
-Registers the `compact_session` tool. It is available once either threshold is
-reached (whichever comes first):
-
-```jsonc
-"agentCompact": { "percent": 50 }                // available from 50% used
-"agentCompact": { "remainingTokens": 200000 }    // available when <= 200k remain
-"agentCompact": true                             // same as { "percent": 50 }
-"agentCompact": false                            // disabled (default)
-```
-
-Availability is intentionally **not** a separate alert. The usual 50/75/90
-notices mention it only once it is available, and the wording is optional, not
-urgent: the agent may compact if it already happens to be at a natural stopping
-point, but should not interrupt a multi-step task just to compact.
-
-## Install
-
-This package targets OpenCode 1.x (the `plugin` config key and the
-`@opencode-ai/plugin` plugin API). OpenCode 2 uses a different plugin API.
-
-### Option 1: clone and reference the directory
-
-```sh
-git clone <this-repo-url> ~/code/opencode-context-budget
-```
-
-Then add the directory to your global config, `~/.config/opencode/opencode.jsonc`:
-
-```jsonc
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["/home/you/code/opencode-context-budget"]
-}
-```
-
-Use the absolute path to the cloned repository. The directory contains a
-`package.json` whose `exports["./server"]` points at the plugin entry, so it can
-be loaded as a plugin package.
-
-To pass options, replace the plain string with the tuple form shown under
-[Options](#options). The `opencode plugin` CLI writes the plain string form, so
-edit the config by hand if you want to set `agentCompact`.
-
-### Option 2: let the OpenCode CLI install it
-
-```sh
-opencode plugin /home/you/code/opencode-context-budget --global
-```
-
-Or install straight from a Git host once the repository is pushed:
-
-```sh
-opencode plugin github:you/opencode-context-budget --global
-```
-
-The CLI installs the package and writes the entry into your config for you.
-
-### Option 3: install from npm
-
-Once published:
-
-```sh
-opencode plugin opencode-context-budget --global
-```
-
-Restart OpenCode after changing the config; plugins are loaded at startup.
-
-## Verify
-
-Start a session and ask the agent to call `context_remaining`, or check the
-plugin list / logs. With deliberate compaction enabled the output looks like:
+Example `context_remaining` result with deliberate compaction enabled:
 
 ```text
 Context (matches the UI sidebar)
-Used: 700k / 1.0M tokens (70% used)
+Used: 700k / 1000k tokens (70% used)
 Remaining: 300k tokens
 Next automatic notification: when context reaches 75%.
-Automatic compaction (built-in): at ~20k tokens remaining (~98% used).
 Deliberate compaction: available now (optional). At a natural stopping point, save important state to files or todos, then call compact_session. Do not interrupt current work just to compact.
-Updated: assistant response completed at 2026-11-13T11:23:51.031Z.
+Updated: session last updated at 2026-11-13T11:23:51.031Z.
 Model: openrouter/~deepseek/deepseek-flash-latest
 Source: latest provider-reported token usage, not a tokenizer estimate.
 ```
 
-## How it works
+Before any model request reports token usage, the tool explains that no context
+value is available yet.
 
-- `src/server.ts` is the plugin entry. It registers `context_remaining` (and
-  optionally `compact_session`), reads the effective native `compaction` config
-  in the `config` hook, and hooks `experimental.chat.system.transform` to push
-  threshold notices. It never modifies the `compaction` settings.
-- `src/lib/context-budget.ts` contains the pure logic: reading assistant token
-  usage, resolving the model's context limit from the provider list, computing
-  percentages/remaining budget, mirroring OpenCode's built-in overflow formula,
-  and formatting messages.
-- Deliberate compaction is scheduled by the tool and executed on the next
-  `session.idle` event. It cannot safely call the compaction endpoint
-  synchronously from inside a tool: OpenCode serializes runs per session, so
-  awaiting compaction mid-turn would wait on the run that is waiting for the
-  tool.
-- Threshold notices are sent at most once per session and threshold. Session
-  state is cleared on `session.compacted` and `session.deleted`.
-- The plugin has no runtime dependencies. It only uses type-only imports from
-  `@opencode-ai/plugin`, which OpenCode already provides.
+## Behavior details
+
+- Threshold notices are registered through `ctx.session.hook("context")`. The
+  plugin records the highest threshold reached (50, 75, or 90) and sends each
+  notice at most once per session and threshold. If usage jumps past several
+  thresholds, only the highest crossed threshold is reported.
+- Threshold state is cleared on `session.compaction.ended` and `session.deleted`
+  events.
+- `compact_session` refuses until the configured `agentCompact` gate is met or
+  when no usage has been reported. When it is allowed, it calls
+  `ctx.session.compact({ sessionID })` and returns immediately. OpenCode runs
+  the compaction at the next safe step boundary; repeated requests while one is
+  pending merge into it.
+- Failed reads or compaction requests are reported to the agent as text and do
+  not break the session.
+- The plugin imports `Plugin` from `@opencode/plugin`, which OpenCode provides.
 
 ## Development
 
