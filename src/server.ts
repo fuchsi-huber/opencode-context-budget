@@ -1,8 +1,17 @@
 import { Plugin } from "@opencode/plugin"
 import {
+  analyzeTranscript,
+  breakdown,
   deliberateCompactionAvailable,
   describeDeliberateThreshold,
+  estimateEtaTurns,
+  estimatePostCompaction,
+  estimateTextTokens,
+  formatAsOf,
+  formatBreakdown,
   formatDeliberateCompaction,
+  formatPostCompaction,
+  formatReclaimable,
   formatSnapshot,
   formatThresholdNotice,
   formatTokens,
@@ -12,10 +21,11 @@ import {
   thresholdFor,
   type ContextSnapshot,
   type DeliberateCompactionConfig,
+  type RequestSizes,
 } from "./lib/context-budget.ts"
 
 const TOOL_DESCRIPTION =
-  "Return the context-window usage shown in the UI sidebar: used tokens, context limit, remaining tokens, percentage, the next automatic warning threshold, deliberate compaction availability, and when the value was last updated. Use this before large reads, edits, or long multi-step tasks when you need to know how much context remains."
+  "Return the context-window usage shown in the UI sidebar: used tokens, context limit, remaining tokens, percentage, an estimated breakdown by system/tools, user, assistant, and tool output, reclaimable stale file reads, the next automatic warning threshold with an ETA in turns, a post-compaction estimate, and the turn the value is current as of. Use this before large reads, edits, or long multi-step tasks when you need to know how much context remains."
 
 const COMPACT_DESCRIPTION =
   "Request compaction of the current session to free context. Optional: call only when context_remaining reports that deliberate compaction is available, and only at a natural stopping point (not in the middle of a multi-step task). Before calling, save important findings or plans to files or todos, because compaction replaces earlier conversation detail with a summary. Compaction runs at the next safe step boundary, so end your response after calling it."
@@ -62,6 +72,7 @@ export default Plugin.define({
     const agentCompact = parseAgentCompact((ctx.options as Record<string, unknown>).agentCompact)
     const thresholds = normalizeThresholds((ctx.options as Record<string, unknown>).thresholds)
     const notified = new Map<string, number>()
+    const requests = new Map<string, RequestSizes>()
 
     async function snapshot(sessionID: string): Promise<ContextSnapshot | undefined> {
       const session = await ctx.session.get({ sessionID })
@@ -96,13 +107,41 @@ export default Plugin.define({
                   "No context usage has been reported in this session yet. The UI sidebar also has no context value until a model request reports token usage.",
               }
             }
+
             const next = nextAutomaticThreshold(
               current.percent,
               notified.get(context.sessionID) ?? 0,
               thresholds,
             )
+            const request = requests.get(context.sessionID)
+            const extra: string[] = []
+            let asOf: string | undefined
+            let eta: number | undefined
+
+            try {
+              const transcript = await ctx.session.context({ sessionID: context.sessionID })
+              const analysis = analyzeTranscript(transcript, ctx.location.directory)
+              const table = breakdown(current, analysis, request)
+              if (table) extra.push(...formatBreakdown(table))
+              const reclaimable = formatReclaimable(analysis)
+              if (reclaimable) extra.push(reclaimable)
+              eta = estimateEtaTurns(current, analysis, next)
+              asOf = formatAsOf(analysis)
+            } catch {
+              // The breakdown is best-effort; the totals still work without it.
+            }
+
+            const afterCompaction = estimatePostCompaction(current, request)
+            if (afterCompaction !== undefined) extra.push(formatPostCompaction(afterCompaction))
+            if (agentCompact) extra.push(formatDeliberateCompaction(current, agentCompact))
+
             return {
-              content: formatSnapshot(current, next, [formatDeliberateCompaction(current, agentCompact)]),
+              content: formatSnapshot(current, {
+                nextNotice: next,
+                nextNoticeTurns: eta,
+                extraLines: extra,
+                asOf,
+              }),
             }
           } catch (error) {
             return { content: `Unable to read context usage: ${message(error)}` }
@@ -148,6 +187,11 @@ export default Plugin.define({
 
     await ctx.session.hook("context", async (event) => {
       try {
+        requests.set(event.sessionID, {
+          system: estimateTextTokens(event.system.map((part) => part.text).join("\n")),
+          tools: estimateTextTokens(JSON.stringify(event.tools)),
+        })
+
         const current = await snapshot(event.sessionID)
         if (!current || current.percent === undefined) return
 
@@ -177,6 +221,7 @@ export default Plugin.define({
           signal: controller.signal,
         })) {
           notified.delete(event.data.sessionID)
+          requests.delete(event.data.sessionID)
         }
       } catch {
         // The subscription is best-effort.

@@ -32,7 +32,11 @@ function emptySession(): SessionInfo {
   }
 }
 
-function makeContext(options: Record<string, unknown> = {}, info: SessionInfo = session()) {
+function makeContext(
+  options: Record<string, unknown> = {},
+  info: SessionInfo = session(),
+  transcript: any[] = [],
+) {
   const tools = new Map<string, any>()
   const compactions: any[] = []
   const queue: any[] = []
@@ -41,8 +45,10 @@ function makeContext(options: Record<string, unknown> = {}, info: SessionInfo = 
 
   const ctx = {
     options,
+    location: { directory: "/tmp" },
     session: {
       get: async () => info,
+      context: async () => transcript,
       hook: async (name: string, callback: any) => {
         if (name === "context") contextHook = callback
         return { dispose: async () => {} }
@@ -101,10 +107,10 @@ function makeContext(options: Record<string, unknown> = {}, info: SessionInfo = 
 type Fake = ReturnType<typeof makeContext>
 
 async function withPlugin(
-  input: { options?: Record<string, unknown>; session?: SessionInfo },
+  input: { options?: Record<string, unknown>; session?: SessionInfo; transcript?: any[] },
   run: (fake: Fake) => Promise<void>,
 ) {
-  const fake = makeContext(input.options, input.session)
+  const fake = makeContext(input.options, input.session, input.transcript)
   const cleanup = await plugin.setup(fake.ctx as never)
   try {
     await run(fake)
@@ -204,5 +210,42 @@ test("compact_session refuses before the threshold", async () => {
     const result = await fake.tools.get("compact_session").execute({}, toolContext)
     assert.match(result.content, /not available yet/)
     assert.equal(fake.compactions.length, 0)
+  })
+})
+
+test("context_remaining includes an estimated breakdown and stale read estimate", async () => {
+  const transcript = [
+    {
+      type: "assistant",
+      tokens: { input: 600_000, output: 1_000 },
+      content: [
+        {
+          type: "tool",
+          name: "read",
+          state: {
+            status: "completed",
+            input: { path: "src/a.ts" },
+            content: [{ type: "text", text: "A".repeat(4000) }],
+          },
+        },
+        {
+          type: "tool",
+          name: "edit",
+          state: {
+            status: "completed",
+            input: { path: "src/a.ts" },
+            content: [{ type: "text", text: "ok" }],
+          },
+        },
+      ],
+    },
+  ]
+
+  await withPlugin({ transcript }, async (fake) => {
+    const result = await fake.tools.get("context_remaining").execute({}, toolContext)
+    assert.match(result.content, /Breakdown \(est\.\):/)
+    assert.match(result.content, /Reclaimable \(est\.\):/)
+    assert.match(result.content, /After compaction:/)
+    assert.match(result.content, /As of:/)
   })
 })

@@ -3,9 +3,14 @@ import assert from "node:assert/strict"
 
 import {
   DEFAULT_THRESHOLDS,
+  analyzeTranscript,
+  breakdown,
   deliberateCompactionAvailable,
   describeDeliberateThreshold,
   formatDeliberateCompaction,
+  estimateEtaTurns,
+  estimatePostCompaction,
+  formatAsOf,
   formatSnapshot,
   formatThresholdNotice,
   nextAutomaticThreshold,
@@ -93,15 +98,19 @@ test("deliberate compaction is gated by percent or remaining tokens", () => {
 test("formatted snapshot includes usage, remaining budget, and the next notice", () => {
   const snapshot = snapshotFromUsage({ tokens: { input: 80_000, output: 10_000 }, contextLimit: 100_000 })
 
-  const text = formatSnapshot(snapshot, nextAutomaticThreshold(snapshot.percent, 0, DEFAULT_THRESHOLDS))
+  const text = formatSnapshot(snapshot, {
+    nextNotice: nextAutomaticThreshold(snapshot.percent, 0, DEFAULT_THRESHOLDS),
+  })
   assert.match(text, /Used: 90k \/ 100k tokens \(90% used\)/)
   assert.match(text, /Remaining: 10k tokens/)
   assert.match(text, /Next automatic notification: on the next model request \(the 90% threshold is already crossed\)/)
 
-  const upcoming = formatSnapshot(snapshot, nextAutomaticThreshold(snapshot.percent, 90, DEFAULT_THRESHOLDS))
+  const upcoming = formatSnapshot(snapshot, {
+    nextNotice: nextAutomaticThreshold(snapshot.percent, 90, DEFAULT_THRESHOLDS),
+  })
   assert.match(upcoming, /Next automatic notification: none/)
 
-  const finalText = formatSnapshot(snapshot, undefined)
+  const finalText = formatSnapshot(snapshot)
   assert.match(finalText, /Next automatic notification: none/)
 })
 
@@ -132,4 +141,101 @@ test("threshold notices use the configured threshold list", () => {
   const notice = formatThresholdNotice(snapshot, 60, [60, 80])
   assert.match(notice, /context indicator is at 65%/)
   assert.match(notice, /notified again when the context reaches 80%/)
+})
+
+function transcriptFixture() {
+  return [
+    { type: "user", text: "please read and fix a.ts and b.ts" },
+    {
+      type: "assistant",
+      tokens: { input: 10_000, output: 1_000 },
+      content: [
+        { type: "text", text: "reading files" },
+        {
+          type: "tool",
+          name: "read",
+          state: {
+            status: "completed",
+            input: { path: "src/a.ts" },
+            content: [{ type: "text", text: "A".repeat(4000) }],
+          },
+        },
+        {
+          type: "tool",
+          name: "read",
+          state: {
+            status: "completed",
+            input: { path: "src/b.ts" },
+            content: [{ type: "text", text: "B".repeat(2000) }],
+          },
+        },
+      ],
+    },
+    {
+      type: "assistant",
+      tokens: { input: 20_000, output: 2_000 },
+      content: [
+        {
+          type: "tool",
+          name: "edit",
+          state: {
+            status: "completed",
+            input: { path: "src/a.ts" },
+            content: [{ type: "text", text: "ok" }],
+          },
+        },
+      ],
+    },
+    { type: "user", text: "thanks" },
+    {
+      type: "assistant",
+      tokens: { input: 30_000, output: 1_000 },
+      content: [
+        {
+          type: "tool",
+          name: "read",
+          state: {
+            status: "completed",
+            input: { path: "src/a.ts" },
+            content: [{ type: "text", text: "A2".repeat(1000) }],
+          },
+        },
+      ],
+    },
+  ]
+}
+
+test("analyzeTranscript groups tool output and finds stale reads", () => {
+  const analysis = analyzeTranscript(transcriptFixture(), "/proj")
+  assert.equal(analysis.turn, 2)
+  assert.equal(analysis.reclaimableFiles, 1)
+  assert.equal(analysis.reclaimableReads, 1)
+  assert.equal(analysis.reclaimableTokens, 1000)
+  assert.ok(analysis.tools.some((tool) => tool.name === "read"))
+  assert.ok(analysis.tools.some((tool) => tool.name === "edit"))
+  assert.ok(analysis.growthPerTurn !== undefined && analysis.growthPerTurn > 0)
+})
+
+test("breakdown scales to the provider total", () => {
+  const snapshot = snapshotFromUsage({ tokens: { input: 100_000 }, contextLimit: 1_000_000 })
+  const analysis = analyzeTranscript(transcriptFixture(), "/proj")
+  const table = breakdown(snapshot, analysis, { system: 2_000, tools: 1_000 })
+  assert.ok(table)
+  const total = table!.system + table!.user + table!.assistant + table!.toolOutput
+  assert.ok(Math.abs(total - snapshot.tokens) <= 4)
+  assert.ok(table!.tools.length > 0)
+})
+
+test("ETA and post-compaction estimates use the analysis and request sizes", () => {
+  const snapshot = snapshotFromUsage({ tokens: { input: 700_000 }, contextLimit: 1_000_000 })
+  const analysis = {
+    ...analyzeTranscript(transcriptFixture(), "/proj"),
+    growthPerTurn: 25_000,
+  }
+  assert.equal(estimateEtaTurns(snapshot, analysis, 75), 2)
+  assert.equal(estimatePostCompaction(snapshot, { system: 10_000, tools: 5_000 }), 32_000)
+
+  const asOf = formatAsOf({ ...analysis, pendingTokens: 3_000 })
+  assert.match(asOf, /during turn 2/)
+  assert.match(asOf, /~3k pending/)
 })

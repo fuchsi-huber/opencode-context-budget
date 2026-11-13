@@ -5,9 +5,10 @@ model's context window is left.
 
 ## What it does
 
-- **`context_remaining` tool** — returns used tokens, context limit, remaining
-  tokens, percentage used, the next automatic warning threshold, deliberate
-  compaction availability, and when the value was last updated.
+- **`context_remaining` tool** — provider-reported usage plus estimated
+  breakdowns (system/tools, user, assistant, tool output), reclaimable stale
+  file reads, a burn-rate ETA in turns, a post-compaction estimate, and the turn
+  the value is current as of.
 - **Automatic threshold notices** — adds a short system message when context
   usage reaches the configured thresholds (default 50%, 75%, and 90%).
 - **Optional `compact_session` tool** — lets an agent request a deliberate
@@ -29,7 +30,7 @@ This plugin is distributed from GitHub; it is not published on npm.
 ### Install with the OpenCode CLI (recommended)
 
 ```sh
-opencode plugin add github:fuchsi-huber/opencode-context-budget --global
+opencode plugin add github:fuchsi-huber/opencode-context-budget
 ```
 
 The CLI installs the package and adds it to your global config. It writes the
@@ -122,11 +123,15 @@ Example `context_remaining` result with deliberate compaction enabled:
 Context (matches the UI sidebar)
 Used: 700k / 1000k tokens (70% used)
 Remaining: 300k tokens
-Next automatic notification: when context reaches 75%.
+As of: end of turn 12, before this request (+~3k pending, est.).
+Next automatic notification: when context reaches 75% (in ~8 turns at the current rate).
+Breakdown (est.): system+tools 42k · user 8k · assistant 55k · tool output 595k
+  tools: read 320k · grep 150k · shell 80k · edit 45k
+Reclaimable (est.): ~30k from read outputs of 4 files changed since.
+After compaction: ~65k tokens (est.; default 15k keep window).
 Deliberate compaction: available now (optional). At a natural stopping point, save important state to files or todos, then call compact_session. Do not interrupt current work just to compact.
-Updated: session last updated at 2026-11-13T11:23:51.031Z.
 Model: openrouter/~deepseek/deepseek-flash-latest
-Source: latest provider-reported token usage, not a tokenizer estimate.
+Source: provider-reported totals; breakdown, reclaimable, and ETA are estimates.
 ```
 
 Before any model request reports token usage, the tool explains that no context
@@ -145,6 +150,14 @@ value is available yet.
   `ctx.session.compact({ sessionID })` and returns immediately. OpenCode runs
   the compaction at the next safe step boundary; repeated requests while one is
   pending merge into it.
+- The `context_remaining` tool also estimates a breakdown by serialising the
+  request's system prompt and tool definitions and the transcript's user,
+  assistant, and tool content. Read outputs for files edited after the read are
+  reported as reclaimable. The ETA uses the average context growth over recent
+  turns, and the post-compaction estimate assumes the default 15k keep window.
+  These are estimates; the total usage is provider-reported.
+- The detailed breakdown is only in the tool output. Threshold notices stay
+  short.
 - Failed reads or compaction requests are reported to the agent as text and do
   not break the session.
 - The plugin imports `Plugin` from `@opencode/plugin`, which OpenCode provides.
