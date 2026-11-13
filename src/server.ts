@@ -28,7 +28,7 @@ const TOOL_DESCRIPTION =
   "Return the context-window usage shown in the UI sidebar: used tokens, context limit, remaining tokens, percentage, an estimated breakdown by system/tools, user, assistant, and tool output, the next automatic warning threshold with an ETA in turns, a post-compaction estimate, and the turn the value is current as of. Use this before large reads, edits, or long multi-step tasks when you need to know how much context remains."
 
 const COMPACT_DESCRIPTION =
-  "Request compaction of the current session to free context. Optional: call only when context_remaining reports that deliberate compaction is available, and only at a natural stopping point (not in the middle of a multi-step task). Before calling, save important findings or plans to files or todos, because compaction replaces earlier conversation detail with a summary. Compaction runs at the next safe step boundary, so end your response after calling it."
+  "Compact the session: the conversation is replaced by a model-written summary plus the last ~15,000 tokens of transcript, which frees context. This is not pruning. Earlier messages, tool output, and file contents you read leave your context permanently; the on-disk session log still has them, but they are no longer part of the conversation. The summary uses a fixed template (objective, requirements, decisions, work state, next move, relevant files, important context) and nothing verifies that it captured what you need. It costs one model request and runs at the next safe step boundary. Call only when context_remaining says deliberate compaction is available, at a task boundary, after writing anything important to files or todos. End your response after calling it."
 
 const EMPTY_INPUT = {
   type: "object",
@@ -194,7 +194,7 @@ export default Plugin.define({
               await ctx.session.compact({ sessionID: context.sessionID })
               return {
                 content:
-                  "Compaction requested. It runs at the next safe step boundary. Do not start new work; anything not saved to files or todos may be lost.",
+                  "Compaction scheduled. It runs at the next safe step boundary and replaces this conversation with a summary plus the last ~15k tokens. Stop here; anything not saved to files or todos may be lost.",
               }
             } catch (error) {
               return { content: `Unable to request compaction: ${message(error)}` }

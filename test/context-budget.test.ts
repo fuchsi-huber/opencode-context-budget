@@ -121,8 +121,9 @@ test("deliberate compaction lines are optional and low-pressure", () => {
 
   const available = formatDeliberateCompaction(snapshot, { percent: 50 })
   assert.match(available, /available now \(optional\)/)
-  assert.match(available, /save important state to files or todos/)
-  assert.match(available, /Do not interrupt current work just to compact/)
+  assert.match(available, /replaces this conversation with a written summary plus the last ~15k tokens/)
+  assert.match(available, /do not come back/)
+  assert.match(available, /Save what matters to files or todos first/)
 
   const later = formatDeliberateCompaction(snapshot, { percent: 80 })
   assert.match(later, /available from 80% used/)

@@ -126,8 +126,8 @@ As of: end of turn 12, before this request (+~3k pending, est.).
 Next automatic notification: when context reaches 75% (in ~8 turns at the current rate).
 Breakdown (est.): system+tools 42k · user 8k · assistant 55k · tool output 595k
   tools: read 320k · grep 150k · shell 80k · edit 45k
-After compaction: 700k → ~65k tokens (est.; 15k keep window).
-Deliberate compaction: available now (optional). At a natural stopping point, save important state to files or todos, then call compact_session. Do not interrupt current work just to compact.
+After compaction: 700k → ~65k tokens (est.; summary + last 15k of transcript).
+Deliberate compaction: available now (optional). It replaces this conversation with a written summary plus the last ~15k tokens; earlier messages, tool output, and file contents do not come back. Save what matters to files or todos first, then call compact_session at a task boundary.
 Model: openrouter/~deepseek/deepseek-flash-latest
 Source: provider-reported totals; breakdown and ETA figures are estimates.
 ```
@@ -148,6 +148,12 @@ value is available yet.
   `ctx.session.compact({ sessionID })` and returns immediately. OpenCode runs
   the compaction at the next safe step boundary; repeated requests while one is
   pending merge into it.
+- Compaction is replacement, not pruning: OpenCode writes a summary from a fixed
+  template (objective, requirements, decisions, work state, next move, relevant
+  files, important context) and keeps roughly the last 15k tokens of transcript.
+  Earlier messages, tool output, and file contents leave the context
+  permanently; the session log on disk still has them, but they are no longer
+  part of the conversation.
 - The `context_remaining` tool also estimates a breakdown by serialising the
   request's system prompt and tool definitions and the transcript's user,
   assistant, and tool content. The ETA uses the average context growth over

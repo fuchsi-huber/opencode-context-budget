@@ -200,7 +200,7 @@ test("compaction events reset threshold state", async () => {
 test("compact_session calls session.compact when available", async () => {
   await withPlugin({ options: { agentCompact: { percent: 50 } } }, async (fake) => {
     const result = await fake.tools.get("compact_session").execute({}, toolContext)
-    assert.match(result.content, /Compaction requested/)
+    assert.match(result.content, /Compaction scheduled/)
     assert.deepEqual(fake.compactions, [{ sessionID: "s1" }])
   })
 })

@@ -158,7 +158,7 @@ export function formatDeliberateCompaction(
 ): string {
   if (!config) return "Deliberate compaction: disabled."
   if (deliberateCompactionAvailable(snapshot, config)) {
-    return "Deliberate compaction: available now (optional). At a natural stopping point, save important state to files or todos, then call compact_session. Do not interrupt current work just to compact."
+    return "Deliberate compaction: available now (optional). It replaces this conversation with a written summary plus the last ~15k tokens; earlier messages, tool output, and file contents do not come back. Save what matters to files or todos first, then call compact_session at a task boundary."
   }
   return `Deliberate compaction: available from ${describeDeliberateThreshold(config)}.`
 }
@@ -433,7 +433,7 @@ export function estimatePostCompaction(
 export function formatPostCompaction(tokens: number, current: number): string {
   return `After compaction: ${formatTokens(current)} → ~${formatTokens(
     tokens,
-  )} tokens (est.; 15k keep window).`
+  )} tokens (est.; summary + last 15k of transcript).`
 }
 
 export function formatAsOf(analysis: TranscriptAnalysis): string {
