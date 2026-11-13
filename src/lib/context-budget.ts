@@ -508,6 +508,6 @@ export function formatThresholdNotice(
       : []),
     `Based on the latest provider-reported usage. ${nextText}`,
     ...extraLines,
-    "Use the context_remaining tool at any time to check the breakdown and the current value.",
+    "Use the context_remaining tool for the system/user/assistant/tool-output breakdown, per-tool totals, the ETA to the next threshold, and the post-compaction estimate.",
   ].join("\n")
 }

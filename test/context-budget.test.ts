@@ -264,3 +264,12 @@ test("latestStepUsage ignores cumulative session totals", () => {
   assert.equal(latestStepUsage([{ type: "assistant", tokens: { input: 0, output: 0 } }]), undefined)
   assert.equal(latestStepUsage([]), undefined)
 })
+
+test("threshold notice points at what the tool provides", () => {
+  const snapshot = snapshotFromUsage({ tokens: { input: 560_000 }, contextLimit: 1_000_000 })
+  const notice = formatThresholdNotice(snapshot, 50, DEFAULT_THRESHOLDS)
+  assert.match(notice, /context_remaining tool for the system\/user\/assistant\/tool-output breakdown/)
+  assert.match(notice, /per-tool totals/)
+  assert.match(notice, /ETA to the next threshold/)
+  assert.match(notice, /post-compaction estimate/)
+})
