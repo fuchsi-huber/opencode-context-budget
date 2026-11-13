@@ -7,6 +7,7 @@ import {
   formatThresholdNotice,
   formatTokens,
   nextAutomaticThreshold,
+  normalizeThresholds,
   snapshotFromUsage,
   thresholdFor,
   type ContextSnapshot,
@@ -59,6 +60,7 @@ export default Plugin.define({
   id: "opencode-context-budget",
   async setup(ctx) {
     const agentCompact = parseAgentCompact((ctx.options as Record<string, unknown>).agentCompact)
+    const thresholds = normalizeThresholds((ctx.options as Record<string, unknown>).thresholds)
     const notified = new Map<string, number>()
 
     async function snapshot(sessionID: string): Promise<ContextSnapshot | undefined> {
@@ -94,7 +96,11 @@ export default Plugin.define({
                   "No context usage has been reported in this session yet. The UI sidebar also has no context value until a model request reports token usage.",
               }
             }
-            const next = nextAutomaticThreshold(current.percent, notified.get(context.sessionID) ?? 0)
+            const next = nextAutomaticThreshold(
+              current.percent,
+              notified.get(context.sessionID) ?? 0,
+              thresholds,
+            )
             return {
               content: formatSnapshot(current, next, [formatDeliberateCompaction(current, agentCompact)]),
             }
@@ -146,7 +152,7 @@ export default Plugin.define({
         if (!current || current.percent === undefined) return
 
         const previous = notified.get(event.sessionID) ?? 0
-        const reached = thresholdFor(current.percent)
+        const reached = thresholdFor(current.percent, thresholds)
         if (reached === undefined || reached <= previous) return
 
         notified.set(event.sessionID, reached)
@@ -154,7 +160,10 @@ export default Plugin.define({
           agentCompact && deliberateCompactionAvailable(current, agentCompact)
             ? [formatDeliberateCompaction(current, agentCompact)]
             : []
-        event.system.push({ type: "text", text: formatThresholdNotice(current, reached, extra) })
+        event.system.push({
+          type: "text",
+          text: formatThresholdNotice(current, reached, thresholds, extra),
+        })
       } catch {
         // Context reporting must never break a model request.
       }

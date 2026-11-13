@@ -1,6 +1,18 @@
-export const THRESHOLDS = [50, 75, 90] as const
+export const DEFAULT_THRESHOLDS = [50, 75, 90] as const
 
-export type Threshold = (typeof THRESHOLDS)[number]
+export type Threshold = number
+
+export function normalizeThresholds(value: unknown): number[] {
+  if (!Array.isArray(value)) return [...DEFAULT_THRESHOLDS]
+  const list = value
+    .filter(
+      (item): item is number =>
+        typeof item === "number" && Number.isFinite(item) && item > 0 && item <= 100,
+    )
+    .map((item) => Math.round(item))
+  const unique = [...new Set(list)].sort((a, b) => a - b)
+  return unique.length ? unique : [...DEFAULT_THRESHOLDS]
+}
 
 export type Usage = {
   input: number
@@ -89,31 +101,33 @@ export function snapshotFromUsage(input: SnapshotInput): ContextSnapshot {
   }
 }
 
-export function thresholdFor(percent: number): Threshold | undefined {
-  for (let index = THRESHOLDS.length - 1; index >= 0; index--) {
-    if (percent >= THRESHOLDS[index]) return THRESHOLDS[index]
+export function thresholdFor(percent: number, thresholds: readonly number[]): number | undefined {
+  for (let index = thresholds.length - 1; index >= 0; index--) {
+    if (percent >= thresholds[index]) return thresholds[index]
   }
   return undefined
 }
 
-export function nextThreshold(threshold: Threshold): Threshold | undefined {
-  const index = THRESHOLDS.indexOf(threshold)
-  return index >= 0 ? THRESHOLDS[index + 1] : undefined
+export function nextThreshold(threshold: number, thresholds: readonly number[]): number | undefined {
+  const index = thresholds.indexOf(threshold)
+  if (index >= 0) return thresholds[index + 1]
+  return nextThresholdAfter(threshold, thresholds)
 }
 
-export function nextThresholdAfter(value: number): Threshold | undefined {
-  return THRESHOLDS.find((threshold) => threshold > value)
+export function nextThresholdAfter(value: number, thresholds: readonly number[]): number | undefined {
+  return thresholds.find((threshold) => threshold > value)
 }
 
 export function nextAutomaticThreshold(
   percent: number | undefined,
   notified: number,
-): Threshold | undefined {
+  thresholds: readonly number[],
+): number | undefined {
   if (percent !== undefined) {
-    const due = thresholdFor(percent)
+    const due = thresholdFor(percent, thresholds)
     if (due !== undefined && due > notified) return due
   }
-  return nextThresholdAfter(notified)
+  return nextThresholdAfter(notified, thresholds)
 }
 
 export function deliberateCompactionAvailable(
@@ -182,10 +196,11 @@ export function formatSnapshot(
 
 export function formatThresholdNotice(
   snapshot: ContextSnapshot,
-  threshold: Threshold,
+  threshold: number,
+  thresholds: readonly number[],
   extraLines: string[] = [],
 ): string {
-  const next = nextThreshold(threshold)
+  const next = nextThreshold(threshold, thresholds)
   const nextText = next
     ? `You will be notified again when the context reaches ${next}%.`
     : "This is the final configured threshold; no further automatic notice will be sent."

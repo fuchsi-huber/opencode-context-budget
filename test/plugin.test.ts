@@ -156,6 +156,19 @@ test("context hook injects each threshold notice once per session", async () => 
   })
 })
 
+test("custom thresholds control notices", async () => {
+  await withPlugin({ options: { thresholds: [60, 80] } }, async (fake) => {
+    const hook = fake.getContextHook()
+    assert.ok(hook)
+
+    const system: any[] = []
+    await hook!({ sessionID: "s1", system })
+    assert.equal(system.length, 1)
+    assert.match(system[0].text, /context indicator is at 70%/)
+    assert.match(system[0].text, /notified again when the context reaches 80%/)
+  })
+})
+
 test("compaction events reset threshold state", async () => {
   await withPlugin({}, async (fake) => {
     const hook = fake.getContextHook()

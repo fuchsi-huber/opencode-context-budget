@@ -2,12 +2,14 @@ import test from "node:test"
 import assert from "node:assert/strict"
 
 import {
+  DEFAULT_THRESHOLDS,
   deliberateCompactionAvailable,
   describeDeliberateThreshold,
   formatDeliberateCompaction,
   formatSnapshot,
   formatThresholdNotice,
   nextAutomaticThreshold,
+  normalizeThresholds,
   snapshotFromUsage,
   thresholdFor,
   usageTotal,
@@ -47,17 +49,30 @@ test("snapshotFromUsage tolerates a missing limit and timestamp", () => {
 })
 
 test("thresholds are reported at 50, 75, and 90 percent", () => {
-  assert.equal(thresholdFor(49), undefined)
-  assert.equal(thresholdFor(51), 50)
-  assert.equal(thresholdFor(75), 75)
-  assert.equal(thresholdFor(99), 90)
+  assert.equal(thresholdFor(49, DEFAULT_THRESHOLDS), undefined)
+  assert.equal(thresholdFor(51, DEFAULT_THRESHOLDS), 50)
+  assert.equal(thresholdFor(75, DEFAULT_THRESHOLDS), 75)
+  assert.equal(thresholdFor(99, DEFAULT_THRESHOLDS), 90)
 })
 
 test("nextAutomaticThreshold prefers a due threshold, otherwise the next one", () => {
-  assert.equal(nextAutomaticThreshold(10, 0), 50)
-  assert.equal(nextAutomaticThreshold(55, 50), 75)
-  assert.equal(nextAutomaticThreshold(undefined, 0), 50)
-  assert.equal(nextAutomaticThreshold(undefined, 90), undefined)
+  assert.equal(nextAutomaticThreshold(10, 0, DEFAULT_THRESHOLDS), 50)
+  assert.equal(nextAutomaticThreshold(55, 50, DEFAULT_THRESHOLDS), 75)
+  assert.equal(nextAutomaticThreshold(undefined, 0, DEFAULT_THRESHOLDS), 50)
+  assert.equal(nextAutomaticThreshold(undefined, 90, DEFAULT_THRESHOLDS), undefined)
+})
+
+test("thresholds are configurable and normalized", () => {
+  assert.deepEqual(normalizeThresholds(undefined), [50, 75, 90])
+  assert.deepEqual(normalizeThresholds([90, 50, 75, 50]), [50, 75, 90])
+  assert.deepEqual(normalizeThresholds([60, "80", 0, 120, 60.4]), [60])
+  assert.deepEqual(normalizeThresholds([]), [50, 75, 90])
+  assert.deepEqual(normalizeThresholds([80, 60]), [60, 80])
+
+  assert.equal(thresholdFor(65, [60, 80]), 60)
+  assert.equal(thresholdFor(85, [60, 80]), 80)
+  assert.equal(nextAutomaticThreshold(65, 60, [60, 80]), 80)
+  assert.equal(nextAutomaticThreshold(50, 0, [60, 80]), 60)
 })
 
 test("deliberate compaction is gated by percent or remaining tokens", () => {
@@ -78,12 +93,12 @@ test("deliberate compaction is gated by percent or remaining tokens", () => {
 test("formatted snapshot includes usage, remaining budget, and the next notice", () => {
   const snapshot = snapshotFromUsage({ tokens: { input: 80_000, output: 10_000 }, contextLimit: 100_000 })
 
-  const text = formatSnapshot(snapshot, nextAutomaticThreshold(snapshot.percent, 0))
+  const text = formatSnapshot(snapshot, nextAutomaticThreshold(snapshot.percent, 0, DEFAULT_THRESHOLDS))
   assert.match(text, /Used: 90k \/ 100k tokens \(90% used\)/)
   assert.match(text, /Remaining: 10k tokens/)
   assert.match(text, /Next automatic notification: on the next model request \(the 90% threshold is already crossed\)/)
 
-  const upcoming = formatSnapshot(snapshot, nextAutomaticThreshold(snapshot.percent, 90))
+  const upcoming = formatSnapshot(snapshot, nextAutomaticThreshold(snapshot.percent, 90, DEFAULT_THRESHOLDS))
   assert.match(upcoming, /Next automatic notification: none/)
 
   const finalText = formatSnapshot(snapshot, undefined)
@@ -104,8 +119,17 @@ test("deliberate compaction lines are optional and low-pressure", () => {
 
 test("threshold notices include the extra deliberate compaction line", () => {
   const snapshot = snapshotFromUsage({ tokens: { input: 800_000, output: 10_000 }, contextLimit: 1_000_000 })
-  const notice = formatThresholdNotice(snapshot, 75, ["Deliberate compaction: available now (optional)."])
+  const notice = formatThresholdNotice(snapshot, 75, DEFAULT_THRESHOLDS, [
+    "Deliberate compaction: available now (optional).",
+  ])
   assert.match(notice, /context indicator is at 81%/)
   assert.match(notice, /Deliberate compaction: available now/)
   assert.match(notice, /final configured threshold|notified again/)
+})
+
+test("threshold notices use the configured threshold list", () => {
+  const snapshot = snapshotFromUsage({ tokens: { input: 650_000 }, contextLimit: 1_000_000 })
+  const notice = formatThresholdNotice(snapshot, 60, [60, 80])
+  assert.match(notice, /context indicator is at 65%/)
+  assert.match(notice, /notified again when the context reaches 80%/)
 })

@@ -9,7 +9,7 @@ model's context window is left.
   tokens, percentage used, the next automatic warning threshold, deliberate
   compaction availability, and when the value was last updated.
 - **Automatic threshold notices** — adds a short system message when context
-  usage reaches 50%, 75%, or 90%.
+  usage reaches the configured thresholds (default 50%, 75%, and 90%).
 - **Optional `compact_session` tool** — lets an agent request a deliberate
   compaction at a safe stopping point.
 
@@ -21,9 +21,6 @@ estimate).
 
 This package targets OpenCode 2.x: the `plugins` config key and the
 `@opencode/plugin` API. The package declares `opencode >=2.0.0`.
-
-The earlier OpenCode 1.x implementation remains in this repository's history,
-but it is not compatible with 2.x and is not installed by the current package.
 
 ## Installation
 
@@ -72,6 +69,7 @@ Options use the object form of the `plugins` entry:
     {
       "package": "github:fuchsi-huber/opencode-context-budget",
       "options": {
+        "thresholds": [50, 75, 90],
         "agentCompact": { "percent": 50 }
       }
     }
@@ -80,6 +78,20 @@ Options use the object form of the `plugins` entry:
 ```
 
 For a local clone, use the absolute directory as `package`.
+
+#### `thresholds`
+
+Percentages at which the plugin injects a context notice. Defaults to
+`[50, 75, 90]`.
+
+```jsonc
+"thresholds": [50, 75, 90] // default
+"thresholds": [60, 80]     // two notices
+```
+
+Values must be numbers greater than 0 and at most 100. They are rounded to
+integers, deduplicated, and sorted. An empty or invalid list falls back to the
+default thresholds.
 
 #### `agentCompact`
 
@@ -99,33 +111,8 @@ either condition is met. An object with neither a valid `percent` nor a valid
 most 100; `remainingTokens` must be a positive number.
 
 `agentCompact` does not create a separate notification milestone. The normal
-50/75/90 notices mention deliberate compaction only when it is currently
+threshold notices mention deliberate compaction only when it is currently
 available.
-
-### Automatic compaction
-
-OpenCode has built-in automatic compaction. Configure it in `opencode.json(c)`:
-
-```jsonc
-{
-  "compaction": {
-    "auto": true,
-    "buffer": "20%",
-    "keep": { "tokens": 15000 }
-  }
-}
-```
-
-- `auto` (default `true`) compacts automatically near the context limit.
-- `buffer` is the room kept free below the model's window. It accepts a share
-  such as `"20%"` or a token count; the default is `"15%"`, at least 16k.
-- `keep.tokens` is the approximate recent conversation kept beside the summary;
-  the default is 15000.
-
-This plugin neither reads nor changes these settings. OpenCode 2.x does not
-expose the effective compaction configuration to plugins, so the plugin cannot
-report the exact automatic compaction trigger. Configure and verify it with
-`opencode debug config`.
 
 ## Agent-facing output
 
@@ -148,8 +135,8 @@ value is available yet.
 ## Behavior details
 
 - Threshold notices are registered through `ctx.session.hook("context")`. The
-  plugin records the highest threshold reached (50, 75, or 90) and sends each
-  notice at most once per session and threshold. If usage jumps past several
+  plugin records the highest configured threshold reached and sends each notice
+  at most once per session and threshold. If usage jumps past several
   thresholds, only the highest crossed threshold is reported.
 - Threshold state is cleared on `session.compaction.ended` and `session.deleted`
   events.
