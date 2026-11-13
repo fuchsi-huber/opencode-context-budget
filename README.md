@@ -6,9 +6,8 @@ model's context window is left.
 ## What it does
 
 - **`context_remaining` tool** — provider-reported usage plus estimated
-  breakdowns (system/tools, user, assistant, tool output), reclaimable stale
-  file reads, a burn-rate ETA in turns, a post-compaction estimate, and the turn
-  the value is current as of.
+  breakdowns (system/tools, user, assistant, tool output), a burn-rate ETA in
+  turns, a post-compaction estimate, and the turn the value is current as of.
 - **Automatic threshold notices** — adds a short system message when context
   usage reaches the configured thresholds (default 50%, 75%, and 90%).
 - **Optional `compact_session` tool** — lets an agent request a deliberate
@@ -127,11 +126,10 @@ As of: end of turn 12, before this request (+~3k pending, est.).
 Next automatic notification: when context reaches 75% (in ~8 turns at the current rate).
 Breakdown (est.): system+tools 42k · user 8k · assistant 55k · tool output 595k
   tools: read 320k · grep 150k · shell 80k · edit 45k
-Reclaimable (est.): ~30k from read outputs of 4 files changed since.
-After compaction: ~65k tokens (est.; default 15k keep window).
+After compaction: 700k → ~65k tokens (est.; 15k keep window).
 Deliberate compaction: available now (optional). At a natural stopping point, save important state to files or todos, then call compact_session. Do not interrupt current work just to compact.
 Model: openrouter/~deepseek/deepseek-flash-latest
-Source: provider-reported totals; breakdown, reclaimable, and ETA are estimates.
+Source: provider-reported totals; breakdown and ETA figures are estimates.
 ```
 
 Before any model request reports token usage, the tool explains that no context
@@ -152,10 +150,9 @@ value is available yet.
   pending merge into it.
 - The `context_remaining` tool also estimates a breakdown by serialising the
   request's system prompt and tool definitions and the transcript's user,
-  assistant, and tool content. Read outputs for files edited after the read are
-  reported as reclaimable. The ETA uses the average context growth over recent
-  turns, and the post-compaction estimate assumes the default 15k keep window.
-  These are estimates; the total usage is provider-reported.
+  assistant, and tool content. The ETA uses the average context growth over
+  recent turns, and the post-compaction estimate assumes the default 15k keep
+  window. These are estimates; the total usage is provider-reported.
 - The detailed breakdown is only in the tool output. Threshold notices stay
   short.
 - Failed reads or compaction requests are reported to the agent as text and do

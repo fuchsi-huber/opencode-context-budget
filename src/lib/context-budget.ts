@@ -1,5 +1,3 @@
-import path from "node:path"
-
 export const DEFAULT_THRESHOLDS = [50, 75, 90] as const
 
 export type Threshold = number
@@ -172,7 +170,6 @@ export type TranscriptContent = {
   name?: string
   state?: {
     status?: string
-    input?: unknown
     content?: ReadonlyArray<{ type?: string; text?: string; uri?: string }>
   }
 }
@@ -182,6 +179,7 @@ export type TranscriptEntry = {
   tokens?: UsageLike
   text?: string
   summary?: string
+  model?: { providerID?: string; id?: string }
   content?: ReadonlyArray<TranscriptContent>
 }
 
@@ -199,14 +197,40 @@ export type TranscriptAnalysis = {
   otherTokens: number
   tools: ToolBreakdown[]
   growthPerTurn?: number
-  reclaimableTokens: number
-  reclaimableFiles: number
-  reclaimableReads: number
 }
 
 export function estimateTextTokens(text: string | undefined): number {
   if (!text) return 0
   return Math.ceil(text.length / 4)
+}
+
+export type StepUsage = {
+  tokens: UsageLike
+  providerID?: string
+  modelID?: string
+}
+
+/**
+ * The most recent model step, which is what the UI shows as the current
+ * context size. `Session.Info.tokens` is cumulative over the whole session and
+ * grows far beyond the window, so it must not be used for this.
+ */
+export function latestStep(entries: readonly TranscriptEntry[]): StepUsage | undefined {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index]
+    if (entry.type !== "assistant") continue
+    if (usageTotal(entry.tokens) <= 0) continue
+    return {
+      tokens: entry.tokens ?? {},
+      providerID: entry.model?.providerID,
+      modelID: entry.model?.id,
+    }
+  }
+  return undefined
+}
+
+export function latestStepUsage(entries: readonly TranscriptEntry[]): UsageLike | undefined {
+  return latestStep(entries)?.tokens
 }
 
 function contentTokens(
@@ -225,53 +249,15 @@ function toolContentTokens(state: TranscriptContent["state"]): number {
   return contentTokens(state?.content)
 }
 
-function filePathOf(input: unknown): string | undefined {
-  if (!input || typeof input !== "object") return undefined
-  const record = input as Record<string, unknown>
-  for (const key of ["path", "filePath", "file", "filename"]) {
-    const value = record[key]
-    if (typeof value === "string" && value.length > 0) return value
-  }
-  return undefined
-}
-
-function patchPaths(input: unknown): string[] {
-  if (!input || typeof input !== "object") return []
-  const text = (input as Record<string, unknown>).patchText
-  if (typeof text !== "string") return []
-  const paths: string[] = []
-  for (const match of text.matchAll(/^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm)) {
-    const value = match[1]?.trim()
-    if (value) paths.push(value)
-  }
-  return paths
-}
-
-const MUTATING_TOOLS = new Set(["edit", "write", "patch"])
-
-export function analyzeTranscript(
-  entries: readonly TranscriptEntry[],
-  directory: string,
-): TranscriptAnalysis {
+export function analyzeTranscript(entries: readonly TranscriptEntry[]): TranscriptAnalysis {
   let turn = 0
   let userTokens = 0
   let assistantTokens = 0
   let toolOutputTokens = 0
   let otherTokens = 0
   const tools = new Map<string, number>()
-  const reads: Array<{ order: number; path: string; tokens: number }> = []
-  const mutations = new Map<string, number>()
   const turnTotals: Array<{ turn: number; tokens: number }> = []
   let lastAssistantIndex = -1
-  let toolOrder = 0
-
-  const resolve = (raw: string) => {
-    try {
-      return path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(directory, raw)
-    } catch {
-      return raw
-    }
-  }
 
   for (let index = 0; index < entries.length; index++) {
     const entry = entries[index]
@@ -284,22 +270,10 @@ export function analyzeTranscript(
         }
         if (part.type !== "tool") continue
 
-        const order = toolOrder++
         const tokens = toolContentTokens(part.state)
         toolOutputTokens += tokens
         const name = part.name ?? "unknown"
         tools.set(name, (tools.get(name) ?? 0) + tokens)
-
-        const file = filePathOf(part.state?.input)
-        if (file) {
-          const normalized = resolve(file)
-          if (name === "read") reads.push({ order, path: normalized, tokens })
-          if (MUTATING_TOOLS.has(name)) mutations.set(normalized, order)
-        } else if (name === "patch") {
-          for (const patchPath of patchPaths(part.state?.input)) {
-            mutations.set(resolve(patchPath), order)
-          }
-        }
       }
 
       const stepTotal = usageTotal(entry.tokens)
@@ -333,17 +307,6 @@ export function analyzeTranscript(
     if (entry.type === "compaction") {
       otherTokens += estimateTextTokens(entry.summary)
     }
-  }
-
-  let reclaimableTokens = 0
-  let reclaimableReads = 0
-  const staleFiles = new Set<string>()
-  for (const read of reads) {
-    const mutatedAt = mutations.get(read.path)
-    if (mutatedAt === undefined || mutatedAt <= read.order) continue
-    reclaimableTokens += read.tokens
-    reclaimableReads += 1
-    staleFiles.add(read.path)
   }
 
   let pendingTokens = 0
@@ -385,9 +348,6 @@ export function analyzeTranscript(
       .map(([name, tokens]) => ({ name, tokens }))
       .sort((a, b) => b.tokens - a.tokens),
     growthPerTurn,
-    reclaimableTokens,
-    reclaimableFiles: staleFiles.size,
-    reclaimableReads,
   }
 }
 
@@ -443,12 +403,6 @@ export function formatBreakdown(value: Breakdown): string[] {
   return lines
 }
 
-export function formatReclaimable(analysis: TranscriptAnalysis): string | undefined {
-  if (analysis.reclaimableTokens <= 0) return undefined
-  const files = analysis.reclaimableFiles === 1 ? "1 file" : `${analysis.reclaimableFiles} files`
-  return `Reclaimable (est.): ~${formatTokens(analysis.reclaimableTokens)} from read outputs of ${files} changed since.`
-}
-
 export function estimateEtaTurns(
   snapshot: ContextSnapshot,
   analysis: TranscriptAnalysis,
@@ -470,16 +424,16 @@ export function estimatePostCompaction(
   snapshot: ContextSnapshot,
   request: RequestSizes | undefined,
 ): number | undefined {
+  if (!request) return undefined
   const fixed =
-    (request?.system ?? 0) +
-    (request?.tools ?? 0) +
-    DEFAULT_COMPACTION_KEEP_TOKENS +
-    SUMMARY_OVERHEAD_TOKENS
+    request.system + request.tools + DEFAULT_COMPACTION_KEEP_TOKENS + SUMMARY_OVERHEAD_TOKENS
   return snapshot.tokens > fixed ? fixed : undefined
 }
 
-export function formatPostCompaction(tokens: number): string {
-  return `After compaction: ~${formatTokens(tokens)} tokens (est.; default 15k keep window).`
+export function formatPostCompaction(tokens: number, current: number): string {
+  return `After compaction: ${formatTokens(current)} → ~${formatTokens(
+    tokens,
+  )} tokens (est.; 15k keep window).`
 }
 
 export function formatAsOf(analysis: TranscriptAnalysis): string {
@@ -529,7 +483,7 @@ export function formatSnapshot(
   if (!asOf) lines.push(`Updated: ${snapshot.updatedDescription}.`)
   lines.push(`Model: ${snapshot.providerID}/${snapshot.modelID}`)
   lines.push(
-    "Source: provider-reported totals; breakdown, reclaimable, and ETA are estimates.",
+    "Source: provider-reported totals; breakdown and ETA figures are estimates.",
   )
 
   return lines.join("\n")

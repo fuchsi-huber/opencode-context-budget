@@ -213,7 +213,7 @@ test("compact_session refuses before the threshold", async () => {
   })
 })
 
-test("context_remaining includes an estimated breakdown and stale read estimate", async () => {
+test("context_remaining includes an estimated breakdown and post-compaction projection", async () => {
   const transcript = [
     {
       type: "assistant",
@@ -225,7 +225,7 @@ test("context_remaining includes an estimated breakdown and stale read estimate"
           state: {
             status: "completed",
             input: { path: "src/a.ts" },
-            content: [{ type: "text", text: "A".repeat(4000) }],
+            content: [{ type: "text", text: "A".repeat(40_000) }],
           },
         },
         {
@@ -242,10 +242,31 @@ test("context_remaining includes an estimated breakdown and stale read estimate"
   ]
 
   await withPlugin({ transcript }, async (fake) => {
+    await fake.getContextHook()!({
+      sessionID: "s1",
+      system: [{ type: "text", text: "S".repeat(40_000) }],
+      tools: { read: { description: "Read a file" } },
+    })
     const result = await fake.tools.get("context_remaining").execute({}, toolContext)
     assert.match(result.content, /Breakdown \(est\.\):/)
-    assert.match(result.content, /Reclaimable \(est\.\):/)
-    assert.match(result.content, /After compaction:/)
+    assert.match(result.content, /After compaction: 601k → ~/i)
     assert.match(result.content, /As of:/)
+  })
+})
+
+test("uses the latest step, not cumulative session totals", async () => {
+  const cumulative = session(70_000_000)
+  const transcript = [
+    {
+      type: "assistant",
+      tokens: { input: 732, output: 186, reasoning: 131, cache: { read: 281_600, write: 0 } },
+      content: [{ type: "text", text: "done" }],
+    },
+  ]
+
+  await withPlugin({ session: cumulative, transcript }, async (fake) => {
+    const result = await fake.tools.get("context_remaining").execute({}, toolContext)
+    assert.match(result.content, /Used: 282k \/ 1000k tokens \(28% used\)/)
+    assert.doesNotMatch(result.content, /6724%/)
   })
 })

@@ -11,10 +11,10 @@ import {
   formatBreakdown,
   formatDeliberateCompaction,
   formatPostCompaction,
-  formatReclaimable,
   formatSnapshot,
   formatThresholdNotice,
   formatTokens,
+  latestStep,
   nextAutomaticThreshold,
   normalizeThresholds,
   snapshotFromUsage,
@@ -25,7 +25,7 @@ import {
 } from "./lib/context-budget.ts"
 
 const TOOL_DESCRIPTION =
-  "Return the context-window usage shown in the UI sidebar: used tokens, context limit, remaining tokens, percentage, an estimated breakdown by system/tools, user, assistant, and tool output, reclaimable stale file reads, the next automatic warning threshold with an ETA in turns, a post-compaction estimate, and the turn the value is current as of. Use this before large reads, edits, or long multi-step tasks when you need to know how much context remains."
+  "Return the context-window usage shown in the UI sidebar: used tokens, context limit, remaining tokens, percentage, an estimated breakdown by system/tools, user, assistant, and tool output, the next automatic warning threshold with an ETA in turns, a post-compaction estimate, and the turn the value is current as of. Use this before large reads, edits, or long multi-step tasks when you need to know how much context remains."
 
 const COMPACT_DESCRIPTION =
   "Request compaction of the current session to free context. Optional: call only when context_remaining reports that deliberate compaction is available, and only at a natural stopping point (not in the middle of a multi-step task). Before calling, save important findings or plans to files or todos, because compaction replaces earlier conversation detail with a summary. Compaction runs at the next safe step boundary, so end your response after calling it."
@@ -74,23 +74,42 @@ export default Plugin.define({
     const notified = new Map<string, number>()
     const requests = new Map<string, RequestSizes>()
 
-    async function snapshot(sessionID: string): Promise<ContextSnapshot | undefined> {
-      const session = await ctx.session.get({ sessionID })
+    async function inspect(sessionID: string): Promise<{
+      current: ContextSnapshot
+      transcript: Awaited<ReturnType<typeof ctx.session.context>>
+    } | undefined> {
+      const [session, models, transcript] = await Promise.all([
+        ctx.session.get({ sessionID }),
+        ctx.model.list(),
+        ctx.session
+          .context({ sessionID })
+          .catch(() => [] as Awaited<ReturnType<typeof ctx.session.context>>),
+      ])
       const ref = session.model ?? (await ctx.model.default()).data ?? undefined
-      const models = await ctx.model.list()
-      const model = ref
-        ? models.data.find((item) => item.providerID === ref.providerID && item.id === ref.id)
+      // The latest step carries the model the limit applies to, matching the UI.
+      const step = latestStep(transcript)
+      const stepProvider = step?.providerID ?? ref?.providerID
+      const stepModel = step?.modelID ?? ref?.id
+      const model = stepProvider && stepModel
+        ? models.data.find((item) => item.providerID === stepProvider && item.id === stepModel)
         : undefined
 
+      // The latest model step is the current context size; session tokens are cumulative.
+      const tokens = step?.tokens ?? session.tokens
+
       const current = snapshotFromUsage({
-        tokens: session.tokens,
+        tokens,
         contextLimit: model?.limit.context,
         updatedAt: session.time.idle ?? session.time.updated,
-        providerID: ref?.providerID,
-        modelID: ref?.id,
+        providerID: stepProvider,
+        modelID: stepModel,
       })
 
-      return current.tokens > 0 ? current : undefined
+      return current.tokens > 0 ? { current, transcript } : undefined
+    }
+
+    async function snapshot(sessionID: string): Promise<ContextSnapshot | undefined> {
+      return (await inspect(sessionID))?.current
     }
 
     await ctx.tool.transform((editor) => {
@@ -100,13 +119,14 @@ export default Plugin.define({
         input: EMPTY_INPUT,
         execute: async (_input, context) => {
           try {
-            const current = await snapshot(context.sessionID)
-            if (!current) {
+            const found = await inspect(context.sessionID)
+            if (!found) {
               return {
                 content:
                   "No context usage has been reported in this session yet. The UI sidebar also has no context value until a model request reports token usage.",
               }
             }
+            const current = found.current
 
             const next = nextAutomaticThreshold(
               current.percent,
@@ -119,12 +139,9 @@ export default Plugin.define({
             let eta: number | undefined
 
             try {
-              const transcript = await ctx.session.context({ sessionID: context.sessionID })
-              const analysis = analyzeTranscript(transcript, ctx.location.directory)
+              const analysis = analyzeTranscript(found.transcript)
               const table = breakdown(current, analysis, request)
               if (table) extra.push(...formatBreakdown(table))
-              const reclaimable = formatReclaimable(analysis)
-              if (reclaimable) extra.push(reclaimable)
               eta = estimateEtaTurns(current, analysis, next)
               asOf = formatAsOf(analysis)
             } catch {
@@ -132,7 +149,9 @@ export default Plugin.define({
             }
 
             const afterCompaction = estimatePostCompaction(current, request)
-            if (afterCompaction !== undefined) extra.push(formatPostCompaction(afterCompaction))
+            if (afterCompaction !== undefined) {
+              extra.push(formatPostCompaction(afterCompaction, current.tokens))
+            }
             if (agentCompact) extra.push(formatDeliberateCompaction(current, agentCompact))
 
             return {

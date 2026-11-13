@@ -13,6 +13,8 @@ import {
   formatAsOf,
   formatSnapshot,
   formatThresholdNotice,
+  latestStep,
+  latestStepUsage,
   nextAutomaticThreshold,
   normalizeThresholds,
   snapshotFromUsage,
@@ -205,12 +207,9 @@ function transcriptFixture() {
   ]
 }
 
-test("analyzeTranscript groups tool output and finds stale reads", () => {
-  const analysis = analyzeTranscript(transcriptFixture(), "/proj")
+test("analyzeTranscript groups tool output and counts turns", () => {
+  const analysis = analyzeTranscript(transcriptFixture())
   assert.equal(analysis.turn, 2)
-  assert.equal(analysis.reclaimableFiles, 1)
-  assert.equal(analysis.reclaimableReads, 1)
-  assert.equal(analysis.reclaimableTokens, 1000)
   assert.ok(analysis.tools.some((tool) => tool.name === "read"))
   assert.ok(analysis.tools.some((tool) => tool.name === "edit"))
   assert.ok(analysis.growthPerTurn !== undefined && analysis.growthPerTurn > 0)
@@ -218,7 +217,7 @@ test("analyzeTranscript groups tool output and finds stale reads", () => {
 
 test("breakdown scales to the provider total", () => {
   const snapshot = snapshotFromUsage({ tokens: { input: 100_000 }, contextLimit: 1_000_000 })
-  const analysis = analyzeTranscript(transcriptFixture(), "/proj")
+  const analysis = analyzeTranscript(transcriptFixture())
   const table = breakdown(snapshot, analysis, { system: 2_000, tools: 1_000 })
   assert.ok(table)
   const total = table!.system + table!.user + table!.assistant + table!.toolOutput
@@ -229,13 +228,39 @@ test("breakdown scales to the provider total", () => {
 test("ETA and post-compaction estimates use the analysis and request sizes", () => {
   const snapshot = snapshotFromUsage({ tokens: { input: 700_000 }, contextLimit: 1_000_000 })
   const analysis = {
-    ...analyzeTranscript(transcriptFixture(), "/proj"),
+    ...analyzeTranscript(transcriptFixture()),
     growthPerTurn: 25_000,
   }
   assert.equal(estimateEtaTurns(snapshot, analysis, 75), 2)
   assert.equal(estimatePostCompaction(snapshot, { system: 10_000, tools: 5_000 }), 32_000)
+  assert.equal(estimatePostCompaction(snapshot, undefined), undefined)
 
   const asOf = formatAsOf({ ...analysis, pendingTokens: 3_000 })
   assert.match(asOf, /during turn 2/)
   assert.match(asOf, /~3k pending/)
+})
+
+test("latestStepUsage ignores cumulative session totals", () => {
+  const entries = [
+    {
+      type: "assistant",
+      model: { providerID: "openrouter", id: "old" },
+      tokens: { input: 500, output: 10, cache: { read: 10_000, write: 0 } },
+    },
+    { type: "user", text: "next" },
+    {
+      type: "assistant",
+      model: { providerID: "openrouter", id: "~deepseek/deepseek-flash-latest" },
+      tokens: { input: 732, output: 186, reasoning: 131, cache: { read: 281_600, write: 0 } },
+    },
+  ]
+  const step = latestStep(entries)
+  assert.ok(step)
+  assert.equal(step.modelID, "~deepseek/deepseek-flash-latest")
+  const usage = latestStepUsage(entries)
+  assert.ok(usage)
+  assert.equal(usageTotal(usage), 282_649)
+
+  assert.equal(latestStepUsage([{ type: "assistant", tokens: { input: 0, output: 0 } }]), undefined)
+  assert.equal(latestStepUsage([]), undefined)
 })
